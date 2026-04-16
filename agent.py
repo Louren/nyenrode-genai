@@ -184,7 +184,8 @@ tools = [
 ]
 
 # ============================== Model & Prompt ============================
-llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.3)
+AVAILABLE_MODELS = ["gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.4", "gpt-4.1-mini"]
+DEFAULT_MODEL = "gpt-5.4-mini"
 
 prompt = ChatPromptTemplate.from_messages([
     ("system",
@@ -194,9 +195,17 @@ prompt = ChatPromptTemplate.from_messages([
     ("placeholder", "{agent_scratchpad}")
 ])
 
-agent = create_openai_functions_agent(llm=llm, tools=tools, prompt=prompt)
-executor = AgentExecutor(agent=agent, tools=tools, verbose=True, memory=memory,
-                        return_intermediate_steps=True)
+_executor_cache: dict = {}
+
+def _get_executor(model_name: str) -> AgentExecutor:
+    if model_name not in _executor_cache:
+        llm = ChatOpenAI(model=model_name, temperature=0.3)
+        agent = create_openai_functions_agent(llm=llm, tools=tools, prompt=prompt)
+        _executor_cache[model_name] = AgentExecutor(
+            agent=agent, tools=tools, verbose=True, memory=memory,
+            return_intermediate_steps=True,
+        )
+    return _executor_cache[model_name]
 
 # ============================ PDF Ingestion (RAG) =======================
 from pypdf import PdfReader
@@ -263,6 +272,37 @@ def clear_all_memory():
 
 # ================================ Gradio UI ================================
 import gradio as gr
+import json
+
+CHAT_LOG = str(PERSIST_BASE / "chat_history.json")
+
+def _load_chat_history():
+    try:
+        with open(CHAT_LOG, "r") as f:
+            raw = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+    # Restore tool-call messages as ChatMessage objects so Gradio accepts them
+    restored = []
+    for m in raw:
+        if isinstance(m, dict) and m.get("metadata"):
+            restored.append(gr.ChatMessage(role=m["role"], content=m["content"],
+                                           metadata=m["metadata"]))
+        else:
+            restored.append(m)
+    return restored
+
+def _save_chat_history(chat_history):
+    # gr.ChatMessage objects are not JSON-serialisable; convert to plain dicts first
+    serialisable = []
+    for msg in chat_history:
+        if isinstance(msg, gr.ChatMessage):
+            serialisable.append({"role": msg.role, "content": msg.content,
+                                  "metadata": msg.metadata})
+        else:
+            serialisable.append(msg)
+    with open(CHAT_LOG, "w") as f:
+        json.dump(serialisable, f, indent=2)
 
 INSTRUCTIONS = """
 ### 🧠 How to use
@@ -272,7 +312,7 @@ INSTRUCTIONS = """
 - **/clear:** Erases all memory and your PDF database.
 """
 
-def respond(msg, chat_history):
+def respond(msg, chat_history, model_name):
     chat_history = chat_history or []
 
     # Command to clear memory
@@ -280,16 +320,18 @@ def respond(msg, chat_history):
         clear_all_memory()
         chat_history.append({"role": "user", "content": "/clear"})
         chat_history.append({"role": "assistant", "content": "🧹 Memory and PDF base cleared successfully."})
+        _save_chat_history(chat_history)
         return chat_history, chat_history
 
     chat_history.append({"role": "user", "content": msg})
 
     try:
-        result = executor.invoke({"input": msg})
+        result = _get_executor(model_name).invoke({"input": msg})
         response = result["output"]
         steps = result.get("intermediate_steps", [])
     except Exception as e:
         chat_history.append({"role": "assistant", "content": f"⚠️ Error: {e}"})
+        _save_chat_history(chat_history)
         return chat_history, chat_history
 
     for action, observation in steps:
@@ -303,6 +345,7 @@ def respond(msg, chat_history):
         ))
 
     chat_history.append({"role": "assistant", "content": response})
+    _save_chat_history(chat_history)
     return chat_history, chat_history
 
 def upload_pdfs(files, chat_history):
@@ -324,6 +367,7 @@ def upload_pdfs(files, chat_history):
     chat_history.append({"role": "assistant",
                          "content": f"📚 {len(files)} file(s) uploaded. "
                                     f"Indexed {chunks} text chunks into RAG. You can now ask questions!"})
+    _save_chat_history(chat_history)
     return chat_history, chat_history
 
 with gr.Blocks(title="🏰 Nyenrode Agentic AI") as demo:
@@ -336,14 +380,23 @@ with gr.Blocks(title="🏰 Nyenrode Agentic AI") as demo:
 
     with gr.Row():
         msg = gr.Textbox(label="Type your question… (use /clear to reset)", scale=4)
+        model_selector = gr.Dropdown(
+            choices=AVAILABLE_MODELS, value=DEFAULT_MODEL, label="Model", scale=1
+        )
         btn = gr.Button("Send", scale=1)
 
     with gr.Row():
         files = gr.File(label="Upload your PDFs (RAG)", file_count="multiple", file_types=[".pdf"])
         btn_up = gr.Button("Index PDFs")
 
-    btn.click(respond, [msg, state], [chatbot, state]).then(lambda: "", outputs=msg)
-    msg.submit(respond, [msg, state], [chatbot, state]).then(lambda: "", outputs=msg)
+    def _on_load():
+        h = _load_chat_history()
+        return h, h
+
+    demo.load(_on_load, outputs=[chatbot, state])
+
+    btn.click(respond, [msg, state, model_selector], [chatbot, state]).then(lambda: "", outputs=msg)
+    msg.submit(respond, [msg, state, model_selector], [chatbot, state]).then(lambda: "", outputs=msg)
 
     btn_up.click(upload_pdfs, [files, state], [chatbot, state])
 
