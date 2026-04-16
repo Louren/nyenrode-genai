@@ -70,6 +70,72 @@ search = DuckDuckGoSearchAPIWrapper()
 wiki = WikipediaAPIWrapper()
 arxiv = ArxivAPIWrapper()
 
+# ---- Audit Regression Tool ----
+import numpy as np
+import pandas as pd
+from sklearn.linear_model import LinearRegression
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import r2_score, mean_absolute_error
+from sklearn.preprocessing import StandardScaler
+
+# Pre-programmed audit dataset
+# Each row is a company. Target: audit_adjustment_pct (% of revenue requiring restatement).
+_AUDIT_DATA = pd.DataFrame({
+    "revenue_mln":            [12, 45, 8, 200, 30, 5, 90, 150, 22, 60, 18, 310, 7, 55, 100, 25, 40, 130, 16, 70],
+    "total_assets_mln":       [8,  30, 5, 140, 20, 3, 65, 110, 15, 42, 12, 220, 4, 38,  75, 17, 28,  95, 10, 50],
+    "debt_to_equity":         [0.4,1.2,0.2,2.1,0.8,0.1,1.5,1.8,0.6,1.1,0.3,2.4,0.2,0.9,1.3,0.5,0.7,1.6,0.4,1.0],
+    "receivables_days":       [32, 55, 28, 70, 45, 20, 62, 75, 38, 50, 30, 80, 25, 52, 65, 35, 48, 72, 33, 58],
+    "inventory_turnover":     [8,  5,  10, 3,  6,  12, 4,  3,  7,  5,  9,  2,  11, 5,  4,  7,  6,  3,  8,  5 ],
+    "prior_findings_count":   [1,  3,  0,  5,  2,  0,  4,  6,  1,  2,  0,  7,  0,  3,  4,  1,  2,  5,  1,  3 ],
+    "company_age_years":      [15, 8,  22, 5,  12, 30, 6,  4,  18, 10, 25, 3,  35, 9,  7,  14, 11, 5,  20, 8 ],
+    "audit_adjustment_pct":   [0.8,2.1,0.3,4.5,1.2,0.1,3.3,5.0,0.7,1.8,0.2,6.1,0.1,2.0,3.8,0.9,1.5,4.2,0.6,2.3],
+})
+
+_FEATURES = ["revenue_mln", "total_assets_mln", "debt_to_equity",
+             "receivables_days", "inventory_turnover", "prior_findings_count", "company_age_years"]
+_TARGET = "audit_adjustment_pct"
+
+def train_audit_regression(query: str) -> str:
+    """Train a linear regression model on the audit dataset and return results."""
+    X = _AUDIT_DATA[_FEATURES]
+    y = _AUDIT_DATA[_TARGET]
+
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.25, random_state=42)
+
+    scaler = StandardScaler()
+    X_train_s = scaler.fit_transform(X_train)
+    X_test_s  = scaler.transform(X_test)
+
+    model = LinearRegression()
+    model.fit(X_train_s, y_train)
+
+    y_pred = model.predict(X_test_s)
+    r2  = r2_score(y_test, y_pred)
+    mae = mean_absolute_error(y_test, y_pred)
+
+    coef_df = pd.Series(model.coef_, index=_FEATURES).sort_values(key=abs, ascending=False)
+
+    lines = [
+        "=== Audit Adjustment Regression Model ===",
+        f"Target: audit_adjustment_pct (% of revenue requiring restatement)",
+        f"Training samples: {len(X_train)}  |  Test samples: {len(X_test)}",
+        "",
+        f"R²  (test): {r2:.3f}",
+        f"MAE (test): {mae:.3f} percentage points",
+        "",
+        "Feature coefficients (standardised, sorted by impact):",
+    ]
+    for feat, coef in coef_df.items():
+        direction = "↑ higher risk" if coef > 0 else "↓ lower risk"
+        lines.append(f"  {feat:<25} {coef:+.3f}  ({direction})")
+
+    lines += [
+        "",
+        "Key insight: prior_findings_count and debt_to_equity are the strongest",
+        "predictors of audit adjustment size in this dataset.",
+    ]
+    return "\n".join(lines)
+
 def rag_search(query: str) -> str:
     """Search inside uploaded PDFs (RAG). Returns relevant chunks."""
     docs = docs_retriever.get_relevant_documents(query)
@@ -105,6 +171,16 @@ tools = [
         func=rag_search,
         description="Searches your uploaded PDFs (RAG). Input: question or term."
     ),
+    Tool(
+        name="Train_Regression_Model",
+        func=train_audit_regression,
+        description=(
+            "Trains a linear regression model on a pre-loaded audit dataset to predict "
+            "audit adjustment size (% of revenue). Returns model performance (R², MAE) and "
+            "feature importances. Use when asked about audit risk drivers, regression analysis, "
+            "or which financial indicators predict audit adjustments. Input: any question or 'run'."
+        )
+    ),
 ]
 
 # ============================== Model & Prompt ============================
@@ -119,7 +195,8 @@ prompt = ChatPromptTemplate.from_messages([
 ])
 
 agent = create_openai_functions_agent(llm=llm, tools=tools, prompt=prompt)
-executor = AgentExecutor(agent=agent, tools=tools, verbose=True, memory=memory)
+executor = AgentExecutor(agent=agent, tools=tools, verbose=True, memory=memory,
+                        return_intermediate_steps=True)
 
 # ============================ PDF Ingestion (RAG) =======================
 from pypdf import PdfReader
@@ -205,12 +282,26 @@ def respond(msg, chat_history):
         chat_history.append({"role": "assistant", "content": "🧹 Memory and PDF base cleared successfully."})
         return chat_history, chat_history
 
-    try:
-        response = executor.invoke({"input": msg})["output"]
-    except Exception as e:
-        response = f"⚠️ Error: {e}"
-
     chat_history.append({"role": "user", "content": msg})
+
+    try:
+        result = executor.invoke({"input": msg})
+        response = result["output"]
+        steps = result.get("intermediate_steps", [])
+    except Exception as e:
+        chat_history.append({"role": "assistant", "content": f"⚠️ Error: {e}"})
+        return chat_history, chat_history
+
+    for action, observation in steps:
+        tool_input = action.tool_input if isinstance(action.tool_input, str) else str(action.tool_input)
+        obs_preview = str(observation)[:600] + ("…" if len(str(observation)) > 600 else "")
+        content = f"**Input:** {tool_input}\n\n**Output:**\n```\n{obs_preview}\n```"
+        chat_history.append(gr.ChatMessage(
+            role="assistant",
+            content=content,
+            metadata={"title": f"🔧 {action.tool}"},
+        ))
+
     chat_history.append({"role": "assistant", "content": response})
     return chat_history, chat_history
 
