@@ -22,7 +22,7 @@ print("✅ API Key set!")
 
 # ========================= LangChain / Tools =========================
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain_classic.agents import AgentExecutor, create_openai_functions_agent, Tool
+from langchain_classic.agents import AgentExecutor, create_openai_tools_agent, Tool
 from langchain_community.utilities import DuckDuckGoSearchAPIWrapper, WikipediaAPIWrapper, ArxivAPIWrapper, PubMedAPIWrapper
 from langchain_community.vectorstores import Chroma
 from langchain_core.documents import Document
@@ -70,71 +70,82 @@ search = DuckDuckGoSearchAPIWrapper()
 wiki = WikipediaAPIWrapper()
 arxiv = ArxivAPIWrapper()
 
-# ---- Audit Regression Tool ----
-import numpy as np
+# ---- DigiJazz Revenue Regression Tool ----
 import pandas as pd
-from sklearn.linear_model import LinearRegression
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import r2_score, mean_absolute_error
-from sklearn.preprocessing import StandardScaler
+from pathlib import Path as _Path
+import statsmodels.api as _sm
 
-# Pre-programmed audit dataset
-# Each row is a company. Target: audit_adjustment_pct (% of revenue requiring restatement).
-_AUDIT_DATA = pd.DataFrame({
-    "revenue_mln":            [12, 45, 8, 200, 30, 5, 90, 150, 22, 60, 18, 310, 7, 55, 100, 25, 40, 130, 16, 70],
-    "total_assets_mln":       [8,  30, 5, 140, 20, 3, 65, 110, 15, 42, 12, 220, 4, 38,  75, 17, 28,  95, 10, 50],
-    "debt_to_equity":         [0.4,1.2,0.2,2.1,0.8,0.1,1.5,1.8,0.6,1.1,0.3,2.4,0.2,0.9,1.3,0.5,0.7,1.6,0.4,1.0],
-    "receivables_days":       [32, 55, 28, 70, 45, 20, 62, 75, 38, 50, 30, 80, 25, 52, 65, 35, 48, 72, 33, 58],
-    "inventory_turnover":     [8,  5,  10, 3,  6,  12, 4,  3,  7,  5,  9,  2,  11, 5,  4,  7,  6,  3,  8,  5 ],
-    "prior_findings_count":   [1,  3,  0,  5,  2,  0,  4,  6,  1,  2,  0,  7,  0,  3,  4,  1,  2,  5,  1,  3 ],
-    "company_age_years":      [15, 8,  22, 5,  12, 30, 6,  4,  18, 10, 25, 3,  35, 9,  7,  14, 11, 5,  20, 8 ],
-    "audit_adjustment_pct":   [0.8,2.1,0.3,4.5,1.2,0.1,3.3,5.0,0.7,1.8,0.2,6.1,0.1,2.0,3.8,0.9,1.5,4.2,0.6,2.3],
-})
+# Load pre-generated DigiJazz weekly data (or generate on the fly if CSV missing)
+_DATA_CSV = _Path(__file__).parent / "digijazz_data.csv"
 
-_FEATURES = ["revenue_mln", "total_assets_mln", "debt_to_equity",
-             "receivables_days", "inventory_turnover", "prior_findings_count", "company_age_years"]
-_TARGET = "audit_adjustment_pct"
+def _load_digijazz_data() -> pd.DataFrame:
+    if _DATA_CSV.exists():
+        return pd.read_csv(_DATA_CSV, parse_dates=["week"])
+    # Fallback: generate in memory
+    from generate_demo_data import generate
+    return generate()
 
-def train_audit_regression(query: str) -> str:
-    """Train a linear regression model on the audit dataset and return results."""
-    X = _AUDIT_DATA[_FEATURES]
-    y = _AUDIT_DATA[_TARGET]
+_ALL_COST_FEATURES = [
+    "marketing_expenses",
+    "it_costs",
+    "shipping_costs",
+    "employee_expenses",
+    "rental_costs",
+    "legal_costs",
+    "lease_car_costs",
+    "grocery_costs",
+]
+_TARGET = "revenue"
 
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.25, random_state=42)
+def digijazz_dataset_info(_: str) -> str:
+    """Return a summary of the DigiJazz dataset."""
+    df = _load_digijazz_data()
+    return (
+        f"DigiJazz webshop dataset — {len(df)} weekly observations "
+        f"({df['week'].min().date()} to {df['week'].max().date()}).\n"
+        f"Target variable: revenue (weekly €).\n"
+        f"Available cost predictors: {', '.join(_ALL_COST_FEATURES)}.\n\n"
+        + df[[_TARGET] + _ALL_COST_FEATURES].describe().to_string()
+    )
 
-    scaler = StandardScaler()
-    X_train_s = scaler.fit_transform(X_train)
-    X_test_s  = scaler.transform(X_test)
 
-    model = LinearRegression()
-    model.fit(X_train_s, y_train)
-
-    y_pred = model.predict(X_test_s)
-    r2  = r2_score(y_test, y_pred)
-    mae = mean_absolute_error(y_test, y_pred)
-
-    coef_df = pd.Series(model.coef_, index=_FEATURES).sort_values(key=abs, ascending=False)
-
-    lines = [
-        "=== Audit Adjustment Regression Model ===",
-        f"Target: audit_adjustment_pct (% of revenue requiring restatement)",
-        f"Training samples: {len(X_train)}  |  Test samples: {len(X_test)}",
-        "",
-        f"R²  (test): {r2:.3f}",
-        f"MAE (test): {mae:.3f} percentage points",
-        "",
-        "Feature coefficients (standardised, sorted by impact):",
-    ]
-    for feat, coef in coef_df.items():
-        direction = "↑ higher risk" if coef > 0 else "↓ lower risk"
-        lines.append(f"  {feat:<25} {coef:+.3f}  ({direction})")
-
-    lines += [
-        "",
-        "Key insight: prior_findings_count and debt_to_equity are the strongest",
-        "predictors of audit adjustment size in this dataset.",
-    ]
+def digijazz_list_features(_: str) -> str:
+    """List available cost features with basic statistics."""
+    df = _load_digijazz_data()
+    lines = [f"{'Feature':<22}  {'Mean (€)':>12}  {'Std (€)':>11}  {'Min (€)':>11}  {'Max (€)':>11}"]
+    lines.append("-" * 72)
+    for feat in _ALL_COST_FEATURES:
+        col = df[feat]
+        lines.append(f"{feat:<22}  {col.mean():>12,.0f}  {col.std():>11,.0f}  {col.min():>11,.0f}  {col.max():>11,.0f}")
     return "\n".join(lines)
+
+
+def digijazz_train_model(features: str) -> str:
+    """Train OLS on the given comma-separated feature names and return the full results."""
+    df = _load_digijazz_data()
+
+    selected = [f.strip() for f in features.split(",") if f.strip() in _ALL_COST_FEATURES]
+    if not selected:
+        return f"No valid features found. Available: {', '.join(_ALL_COST_FEATURES)}"
+
+    n_test = 26
+    train_df, test_df = df.iloc[:-n_test], df.iloc[-n_test:]
+
+    result = _sm.OLS(train_df[_TARGET], _sm.add_constant(train_df[selected])).fit()
+
+    y_pred = result.predict(_sm.add_constant(test_df[selected]))
+    y_test = test_df[_TARGET]
+    oos_r2   = 1 - ((y_test - y_pred) ** 2).sum() / ((y_test - y_test.mean()) ** 2).sum()
+    oos_mae  = (y_test - y_pred).abs().mean()
+    oos_rmse = ((y_test - y_pred) ** 2).mean() ** 0.5
+
+    return (
+        result.summary().as_text()
+        + f"\n\nOut-of-sample (last {n_test} weeks):\n"
+        + f"  R²   {oos_r2:.4f}  {'(good fit)' if oos_r2 > 0.7 else '(weak)'}\n"
+        + f"  MAE  €{oos_mae:,.0f}\n"
+        + f"  RMSE €{oos_rmse:,.0f}"
+    )
 
 def rag_search(query: str) -> str:
     """Search inside uploaded PDFs (RAG). Returns relevant chunks."""
@@ -172,14 +183,19 @@ tools = [
         description="Searches your uploaded PDFs (RAG). Input: question or term."
     ),
     Tool(
-        name="Train_Regression_Model",
-        func=train_audit_regression,
-        description=(
-            "Trains a linear regression model on a pre-loaded audit dataset to predict "
-            "audit adjustment size (% of revenue). Returns model performance (R², MAE) and "
-            "feature importances. Use when asked about audit risk drivers, regression analysis, "
-            "or which financial indicators predict audit adjustments. Input: any question or 'run'."
-        )
+        name="DigiJazz_Dataset_Info",
+        func=digijazz_dataset_info,
+        description="Returns an overview and descriptive statistics of the DigiJazz weekly dataset. Use this when the user asks about the data, its time range, or wants a general summary. Input: anything (ignored)."
+    ),
+    Tool(
+        name="DigiJazz_List_Features",
+        func=digijazz_list_features,
+        description="Lists all available cost features for the DigiJazz revenue regression model with their mean, std, min, and max. Use this to help the user decide which features to include before training. Input: anything (ignored)."
+    ),
+    Tool(
+        name="DigiJazz_Train_Model",
+        func=digijazz_train_model,
+        description="Trains an OLS regression to predict DigiJazz weekly revenue. Input: comma-separated feature names to include, e.g. 'marketing_expenses, it_costs, shipping_costs'. Available features: marketing_expenses, it_costs, shipping_costs, employee_expenses, rental_costs, legal_costs, lease_car_costs, grocery_costs."
     ),
 ]
 
@@ -200,7 +216,7 @@ _executor_cache: dict = {}
 def _get_executor(model_name: str) -> AgentExecutor:
     if model_name not in _executor_cache:
         llm = ChatOpenAI(model=model_name, temperature=0.3)
-        agent = create_openai_functions_agent(llm=llm, tools=tools, prompt=prompt)
+        agent = create_openai_tools_agent(llm=llm, tools=tools, prompt=prompt)
         _executor_cache[model_name] = AgentExecutor(
             agent=agent, tools=tools, verbose=True, memory=memory,
             return_intermediate_steps=True,
@@ -336,12 +352,11 @@ def respond(msg, chat_history, model_name):
 
     for action, observation in steps:
         tool_input = action.tool_input if isinstance(action.tool_input, str) else str(action.tool_input)
-        obs_preview = str(observation)[:600] + ("…" if len(str(observation)) > 600 else "")
-        content = f"**Input:** {tool_input}\n\n**Output:**\n```\n{obs_preview}\n```"
+        content = f"**Input:** {tool_input}\n\n**Output:**\n```\n{observation}\n```"
         chat_history.append(gr.ChatMessage(
             role="assistant",
             content=content,
-            metadata={"title": f"🔧 {action.tool}"},
+            metadata={"title": f'The LLM used the tool "{action.tool}"', "status": "done"},
         ))
 
     chat_history.append({"role": "assistant", "content": response})
