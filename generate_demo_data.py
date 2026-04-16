@@ -31,13 +31,13 @@ def generate():
     revenue = np.maximum(trend + seasonal + noise, 10_000)
 
     # --- Correlated costs (driven by revenue) ---
-    marketing_pct = rng.uniform(0.06, 0.10, N_WEEKS)   # 6–10% of revenue
-    it_pct        = rng.uniform(0.015, 0.03, N_WEEKS)  # 1.5–3% of revenue
-    shipping_pct  = rng.uniform(0.03, 0.06, N_WEEKS)   # 3–6% of revenue
+    marketing_pct = rng.uniform(0.08, 0.10, N_WEEKS)   # 6–10% of revenue
+    it_pct        = rng.uniform(0.015, 0.02, N_WEEKS)  # 1.5–3% of revenue
+    shipping_pct  = rng.uniform(0.03, 0.04, N_WEEKS)   # 3–6% of revenue
 
-    marketing_expenses = revenue * marketing_pct + rng.normal(0, 500, N_WEEKS)
-    it_costs           = revenue * it_pct          + rng.normal(0, 200, N_WEEKS)
-    shipping_costs     = revenue * shipping_pct    + rng.normal(0, 400, N_WEEKS)
+    marketing_expenses = revenue * marketing_pct + rng.normal(0, 300, N_WEEKS)
+    it_costs           = revenue * it_pct          + rng.normal(0, 100, N_WEEKS)
+    shipping_costs     = revenue * shipping_pct    + rng.normal(0, 200, N_WEEKS)
 
     # --- Fixed cost ---
     rental_costs = np.full(N_WEEKS, 2_200.0)  # fixed rent per week
