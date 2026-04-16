@@ -25,9 +25,9 @@ from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_classic.agents import AgentExecutor, create_openai_functions_agent, Tool
 from langchain_community.utilities import DuckDuckGoSearchAPIWrapper, WikipediaAPIWrapper, ArxivAPIWrapper, PubMedAPIWrapper
 from langchain_community.vectorstores import Chroma
-from langchain.docstore.document import Document
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.memory import VectorStoreRetrieverMemory
+from langchain_core.documents import Document
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_classic.memory import VectorStoreRetrieverMemory
 from langchain_core.prompts import ChatPromptTemplate
 
 # ============================== Paths ===============================
