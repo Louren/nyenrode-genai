@@ -35,12 +35,13 @@ import shutil
 import tempfile
 from pathlib import Path
 
-PERSIST_BASE = Path("/content/agentic_ai_persist")
+_IN_COLAB = Path("/content").exists() and Path("/content").is_mount()
+PERSIST_BASE = Path("/content/agentic_ai_persist") if _IN_COLAB else Path(__file__).parent / "agentic_ai_persist"
 PERSIST_BASE.mkdir(parents=True, exist_ok=True)
 
 MEMORY_DIR = str(PERSIST_BASE / "chroma_memory")        # conversational memory
 DOCS_DIR   = str(PERSIST_BASE / "chroma_docs")          # PDF database
-UPLOAD_DIR = Path("/content/uploads")
+UPLOAD_DIR = Path("/content/uploads") if _IN_COLAB else PERSIST_BASE / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True, parents=True)
 
 # ============================ Embeddings & DB ==============================
@@ -68,7 +69,6 @@ docs_retriever = docs_vectorstore.as_retriever(search_kwargs={"k": 5})
 search = DuckDuckGoSearchAPIWrapper()
 wiki = WikipediaAPIWrapper()
 arxiv = ArxivAPIWrapper()
-pubmed = PubMedAPIWrapper()
 
 def rag_search(query: str) -> str:
     """Search inside uploaded PDFs (RAG). Returns relevant chunks."""
@@ -101,11 +101,6 @@ tools = [
         description="Finds academic papers on Arxiv. Input: query (e.g. 'graph neural networks')."
     ),
     Tool(
-        name="PubMed_Search",
-        func=pubmed.run,
-        description="Finds biomedical articles on PubMed. Input: query (e.g. 'depression CBT RCT')."
-    ),
-    Tool(
         name="RAG_PDFs",
         func=rag_search,
         description="Searches your uploaded PDFs (RAG). Input: question or term."
@@ -117,7 +112,7 @@ llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.3)
 
 prompt = ChatPromptTemplate.from_messages([
     ("system",
-     "You are an AI assistant with access to tools (web, wikipedia, arxiv, pubmed, RAG) "
+     "You are an AI assistant with access to tools (web, wikipedia, arxiv, RAG) "
      "and persistent memory. Cite sources when possible. Be concise and helpful."),
     ("user", "{input}"),
     ("placeholder", "{agent_scratchpad}")
@@ -195,17 +190,19 @@ import gradio as gr
 INSTRUCTIONS = """
 ### 🧠 How to use
 - **General search:** Just ask normally (uses DuckDuckGo/Wikipedia).
-- **Academic:** Ask for academic topics — the agent may use Arxiv or PubMed automatically.
+- **Academic:** Ask for academic topics — the agent may use Arxiv automatically.
 - **Your PDFs (RAG):** Upload files below, then ask questions about them.
 - **/clear:** Erases all memory and your PDF database.
 """
 
 def respond(msg, chat_history):
+    chat_history = chat_history or []
+
     # Command to clear memory
     if msg.strip().lower() == "/clear":
         clear_all_memory()
-        chat_history = chat_history or []
-        chat_history.append(("/clear", "🧹 Memory and PDF base cleared successfully."))
+        chat_history.append({"role": "user", "content": "/clear"})
+        chat_history.append({"role": "assistant", "content": "🧹 Memory and PDF base cleared successfully."})
         return chat_history, chat_history
 
     try:
@@ -213,15 +210,16 @@ def respond(msg, chat_history):
     except Exception as e:
         response = f"⚠️ Error: {e}"
 
-    chat_history = chat_history or []
-    chat_history.append((msg, response))
+    chat_history.append({"role": "user", "content": msg})
+    chat_history.append({"role": "assistant", "content": response})
     return chat_history, chat_history
 
 def upload_pdfs(files, chat_history):
     """Handles uploaded PDFs and indexes them."""
+    chat_history = chat_history or []
+
     if not files:
-        chat_history = chat_history or []
-        chat_history.append(("Upload", "No files uploaded."))
+        chat_history.append({"role": "assistant", "content": "No files uploaded."})
         return chat_history, chat_history
 
     saved_paths = []
@@ -232,14 +230,13 @@ def upload_pdfs(files, chat_history):
         saved_paths.append(str(dest))
 
     chunks = index_pdfs(saved_paths)
-    chat_history = chat_history or []
-    chat_history.append(("Upload",
-                         f"📚 {len(files)} file(s) uploaded. "
-                         f"Indexed {chunks} text chunks into RAG. You can now ask questions!"))
+    chat_history.append({"role": "assistant",
+                         "content": f"📚 {len(files)} file(s) uploaded. "
+                                    f"Indexed {chunks} text chunks into RAG. You can now ask questions!"})
     return chat_history, chat_history
 
-with gr.Blocks(title="Agentic AI — Web + Wikipedia + Arxiv + PubMed + RAG PDFs") as demo:
-    gr.Markdown("# 🤖 Agentic AI with Persistent Memory and RAG (PDFs)")
+with gr.Blocks(title="🏰 Nyenrode Agentic AI") as demo:
+    gr.Markdown("# 🏰🤖 Nyenrode Agentic AI with Persistent Memory and RAG (PDFs)")
     gr.Markdown(INSTRUCTIONS)
 
     with gr.Row():
