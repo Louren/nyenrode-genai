@@ -397,6 +397,34 @@ def respond(msg, chat_history, model_name):
         obs_str = str(observation)
         is_chart = obs_str.startswith("CHART_B64:")
 
+        # Show model thinking/reasoning if the AI emitted content before the tool call
+        # (only present when the model supports extended thinking or outputs a preamble)
+        thinking_text = ""
+        if action.message_log:
+            first_msg = action.message_log[0]
+            content = first_msg.content if hasattr(first_msg, "content") else ""
+            if isinstance(content, str):
+                thinking_text = content.strip()
+            elif isinstance(content, list):
+                # Some models return structured content blocks (e.g. thinking blocks)
+                parts = []
+                for block in content:
+                    if isinstance(block, dict):
+                        if block.get("type") == "thinking":
+                            parts.append(block.get("thinking", ""))
+                        elif block.get("type") == "text":
+                            parts.append(block.get("text", ""))
+                    elif isinstance(block, str):
+                        parts.append(block)
+                thinking_text = "\n".join(p for p in parts if p).strip()
+
+        if thinking_text:
+            chat_history.append(gr.ChatMessage(
+                role="assistant",
+                content=thinking_text,
+                metadata={"title": "Thinking...", "status": "done"},
+            ))
+
         if is_chart:
             b64 = obs_str[len("CHART_B64:"):]
             data_url = f"data:image/png;base64,{b64}"
