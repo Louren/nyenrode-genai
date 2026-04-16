@@ -22,16 +22,17 @@ print("✅ API Key set!")
 
 # ========================= LangChain / Tools =========================
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_core.messages import HumanMessage
 from langchain_classic.agents import AgentExecutor, create_openai_tools_agent, Tool
+from langchain_core.tools import StructuredTool
 from langchain_community.utilities import DuckDuckGoSearchAPIWrapper, WikipediaAPIWrapper, ArxivAPIWrapper, PubMedAPIWrapper
 from langchain_community.vectorstores import Chroma
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_classic.memory import VectorStoreRetrieverMemory
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_classic.memory import ConversationBufferMemory
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 # ============================== Paths ===============================
-import shutil
 import tempfile
 from pathlib import Path
 
@@ -47,15 +48,8 @@ UPLOAD_DIR.mkdir(exist_ok=True, parents=True)
 # ============================ Embeddings & DB ==============================
 embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
 
-# Persistent conversational memory
-memory_vectorstore = Chroma(
-    collection_name="chat_memory",
-    persist_directory=MEMORY_DIR,
-    embedding_function=embeddings,
-)
-
-memory_retriever = memory_vectorstore.as_retriever(search_kwargs={"k": 5})
-memory = VectorStoreRetrieverMemory(retriever=memory_retriever)
+# Conversational memory (buffer — maintains sequential message history)
+memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
 
 # Persistent PDF knowledge base (RAG)
 docs_vectorstore = Chroma(
@@ -97,7 +91,7 @@ _ALL_COST_FEATURES = [
 ]
 _TARGET = "revenue"
 
-def digijazz_dataset_info(_: str) -> str:
+def digijazz_dataset_info() -> str:
     """Return a summary of the DigiJazz dataset."""
     df = _load_digijazz_data()
     return (
@@ -109,7 +103,7 @@ def digijazz_dataset_info(_: str) -> str:
     )
 
 
-def digijazz_list_features(_: str) -> str:
+def digijazz_list_features() -> str:
     """List available cost features with basic statistics."""
     df = _load_digijazz_data()
     lines = [f"{'Feature':<22}  {'Mean (€)':>12}  {'Std (€)':>11}  {'Min (€)':>11}  {'Max (€)':>11}"]
@@ -118,6 +112,40 @@ def digijazz_list_features(_: str) -> str:
         col = df[feat]
         lines.append(f"{feat:<22}  {col.mean():>12,.0f}  {col.std():>11,.0f}  {col.min():>11,.0f}  {col.max():>11,.0f}")
     return "\n".join(lines)
+
+
+def digijazz_chart() -> str:
+    """Generate a chart of all DigiJazz columns over time and return a base64-encoded PNG."""
+    import base64, io
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    df = _load_digijazz_data()
+
+    fig, (ax_rev, ax_costs) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
+    fig.suptitle("DigiJazz — Weekly Financial Data", fontsize=14)
+
+    ax_rev.plot(df["week"], df["revenue"], color="steelblue", linewidth=1.5)
+    ax_rev.set_ylabel("Revenue (€)")
+    ax_rev.set_title("Revenue")
+    ax_rev.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"€{x:,.0f}"))
+
+    for col in _ALL_COST_FEATURES:
+        ax_costs.plot(df["week"], df[col], label=col, linewidth=1)
+    ax_costs.set_ylabel("Cost (€)")
+    ax_costs.set_title("Cost Drivers")
+    ax_costs.legend(fontsize=7, ncol=2)
+    ax_costs.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"€{x:,.0f}"))
+
+    fig.autofmt_xdate()
+    fig.tight_layout()
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=120)
+    plt.close(fig)
+    b64 = base64.b64encode(buf.getvalue()).decode()
+    return f"CHART_B64:{b64}"
 
 
 def digijazz_train_model(features: str) -> str:
@@ -129,11 +157,15 @@ def digijazz_train_model(features: str) -> str:
         return f"No valid features found. Available: {', '.join(_ALL_COST_FEATURES)}"
 
     n_test = 26
+    df = df.copy()
+    df["time"] = range(len(df))   # week index: captures the revenue trend
+
     train_df, test_df = df.iloc[:-n_test], df.iloc[-n_test:]
 
-    result = _sm.OLS(train_df[_TARGET], _sm.add_constant(train_df[selected])).fit()
+    predictors = ["time"] + selected
+    result = _sm.OLS(train_df[_TARGET], _sm.add_constant(train_df[predictors])).fit()
 
-    y_pred = result.predict(_sm.add_constant(test_df[selected]))
+    y_pred = result.predict(_sm.add_constant(test_df[predictors]))
     y_test = test_df[_TARGET]
     oos_r2   = 1 - ((y_test - y_pred) ** 2).sum() / ((y_test - y_test.mean()) ** 2).sum()
     oos_mae  = (y_test - y_pred).abs().mean()
@@ -182,20 +214,25 @@ tools = [
         func=rag_search,
         description="Searches your uploaded PDFs (RAG). Input: question or term."
     ),
-    Tool(
-        name="DigiJazz_Dataset_Info",
+    StructuredTool.from_function(
+        func=digijazz_chart,
+        name="DigiJazz_Chart",
+        description="Generates a chart of all DigiJazz columns (revenue + all cost drivers) over time and displays it.",
+    ),
+    StructuredTool.from_function(
         func=digijazz_dataset_info,
-        description="Returns an overview and descriptive statistics of the DigiJazz weekly dataset. Use this when the user asks about the data, its time range, or wants a general summary. Input: anything (ignored)."
+        name="DigiJazz_Dataset_Info",
+        description="Returns an overview and descriptive statistics of the DigiJazz weekly dataset. Use this when the user asks about the data, its time range, or wants a general summary.",
     ),
-    Tool(
-        name="DigiJazz_List_Features",
+    StructuredTool.from_function(
         func=digijazz_list_features,
-        description="Lists all available cost features for the DigiJazz revenue regression model with their mean, std, min, and max. Use this to help the user decide which features to include before training. Input: anything (ignored)."
+        name="DigiJazz_List_Features",
+        description="Lists all available cost features for the DigiJazz revenue regression model with their mean, std, min, and max. Use this to help the user decide which features to include before training.",
     ),
-    Tool(
-        name="DigiJazz_Train_Model",
+    StructuredTool.from_function(
         func=digijazz_train_model,
-        description="Trains an OLS regression to predict DigiJazz weekly revenue. Input: comma-separated feature names to include, e.g. 'marketing_expenses, it_costs, shipping_costs'. Available features: marketing_expenses, it_costs, shipping_costs, employee_expenses, rental_costs, legal_costs, lease_car_costs, grocery_costs."
+        name="DigiJazz_Train_Model",
+        description="Trains an OLS regression to predict DigiJazz weekly revenue. Input: comma-separated feature names to include, e.g. 'marketing_expenses, it_costs, shipping_costs'. Available features: marketing_expenses, it_costs, shipping_costs, employee_expenses, rental_costs, legal_costs, lease_car_costs, grocery_costs.",
     ),
 ]
 
@@ -205,8 +242,15 @@ DEFAULT_MODEL = "gpt-5.4-mini"
 
 prompt = ChatPromptTemplate.from_messages([
     ("system",
-     "You are an AI assistant with access to tools (web, wikipedia, arxiv, RAG) "
-     "and persistent memory. Cite sources when possible. Be concise and helpful."),
+     "You are an AI audit assistant supporting an auditor working on the DigiJazz.nl engagement. "
+     "DigiJazz was founded in 2015 by Dean Mus and Rob Tone and operates as a premier platform for jazz music lovers worldwide, "
+     "offering streaming, downloads, and vinyl record sales. It expanded into vinyl in 2017. "
+     "Your role is to help the auditor analyse DigiJazz's financial data, build and interpret regression models, "
+     "identify trends and anomalies, and research relevant accounting standards or industry context. "
+     "Be concise, precise, and frame all responses in an audit context. Cite sources where relevant."
+     "Consider the auditor (with limited technical/statistical knowledge) and always tailor your responses to their needs."
+     "In your greeting, briefly introduce yourself and your capabilities, and suggest how you can assist with the audit."),
+    MessagesPlaceholder(variable_name="chat_history"),
     ("user", "{input}"),
     ("placeholder", "{agent_scratchpad}")
 ])
@@ -219,7 +263,7 @@ def _get_executor(model_name: str) -> AgentExecutor:
         agent = create_openai_tools_agent(llm=llm, tools=tools, prompt=prompt)
         _executor_cache[model_name] = AgentExecutor(
             agent=agent, tools=tools, verbose=True, memory=memory,
-            return_intermediate_steps=True,
+            return_intermediate_steps=True, output_key="output",
         )
     return _executor_cache[model_name]
 
@@ -262,29 +306,15 @@ def index_pdfs(file_paths):
     return len(all_docs)
 
 def clear_all_memory():
-    """Deletes conversational and RAG memory."""
-    if Path(MEMORY_DIR).exists():
-        shutil.rmtree(MEMORY_DIR, ignore_errors=True)
-    if Path(DOCS_DIR).exists():
-        shutil.rmtree(DOCS_DIR, ignore_errors=True)
+    """Clears conversational buffer and all RAG documents."""
+    memory.clear()
+    _executor_cache.clear()
 
-    global memory_vectorstore, memory_retriever, memory
-    global docs_vectorstore, docs_retriever
-
-    memory_vectorstore = Chroma(
-        collection_name="chat_memory",
-        persist_directory=MEMORY_DIR,
-        embedding_function=embeddings,
-    )
-    memory_retriever = memory_vectorstore.as_retriever(search_kwargs={"k": 5})
-    memory = VectorStoreRetrieverMemory(retriever=memory_retriever)
-
-    docs_vectorstore = Chroma(
-        collection_name="docs_rag",
-        persist_directory=DOCS_DIR,
-        embedding_function=embeddings,
-    )
-    docs_retriever = docs_vectorstore.as_retriever(search_kwargs={"k": 5})
+    # Delete all documents from the existing collection in-place — avoids
+    # destroying and re-opening the chromadb file (which breaks the Rust client).
+    ids = docs_vectorstore.get()["ids"]
+    if ids:
+        docs_vectorstore.delete(ids)
 
 # ================================ Gradio UI ================================
 import gradio as gr
@@ -298,6 +328,19 @@ def _load_chat_history():
             raw = json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
         return []
+
+    # Re-populate the conversation buffer from saved history so the agent
+    # has context when the app restarts. Only plain user/assistant text messages
+    # are relevant — skip tool-call bubbles (they have metadata).
+    for m in raw:
+        if isinstance(m, dict) and not m.get("metadata"):
+            content = m.get("content", "")
+            if isinstance(content, str):  # skip image messages (content is a dict)
+                if m["role"] == "user":
+                    memory.chat_memory.add_user_message(content)
+                elif m["role"] == "assistant":
+                    memory.chat_memory.add_ai_message(content)
+
     # Restore tool-call messages as ChatMessage objects so Gradio accepts them
     restored = []
     for m in raw:
@@ -334,10 +377,9 @@ def respond(msg, chat_history, model_name):
     # Command to clear memory
     if msg.strip().lower() == "/clear":
         clear_all_memory()
-        chat_history.append({"role": "user", "content": "/clear"})
-        chat_history.append({"role": "assistant", "content": "🧹 Memory and PDF base cleared successfully."})
-        _save_chat_history(chat_history)
-        return chat_history, chat_history
+        Path(CHAT_LOG).unlink(missing_ok=True)
+        cleared = [{"role": "assistant", "content": "🧹 Memory, PDF base, and chat history cleared."}]
+        return cleared, cleared
 
     chat_history.append({"role": "user", "content": msg})
 
@@ -352,12 +394,31 @@ def respond(msg, chat_history, model_name):
 
     for action, observation in steps:
         tool_input = action.tool_input if isinstance(action.tool_input, str) else str(action.tool_input)
-        content = f"**Input:** {tool_input}\n\n**Output:**\n```\n{observation}\n```"
-        chat_history.append(gr.ChatMessage(
-            role="assistant",
-            content=content,
-            metadata={"title": f'The LLM used the tool "{action.tool}"', "status": "done"},
-        ))
+        obs_str = str(observation)
+        is_chart = obs_str.startswith("CHART_B64:")
+
+        if is_chart:
+            b64 = obs_str[len("CHART_B64:"):]
+            data_url = f"data:image/png;base64,{b64}"
+            bubble_content = f"**Input:** {tool_input}"
+            chat_history.append(gr.ChatMessage(
+                role="assistant",
+                content=bubble_content,
+                metadata={"title": f'The LLM used the tool "{action.tool}"', "status": "done"},
+            ))
+            # Render inline so Gradio shows the image regardless of file path sandboxing
+            chat_history.append({"role": "assistant", "content": f"![DigiJazz chart]({data_url})"})
+            # Inject as a vision message into memory so the LLM can see and describe it
+            memory.chat_memory.add_message(HumanMessage(content=[
+                {"type": "text", "text": "The chart has been generated and is now visible to the user."},
+                {"type": "image_url", "image_url": {"url": data_url}},
+            ]))
+        else:
+            chat_history.append(gr.ChatMessage(
+                role="assistant",
+                content=f"**Input:** {tool_input}\n\n**Output:**\n```\n{obs_str}\n```",
+                metadata={"title": f'The LLM used the tool "{action.tool}"', "status": "done"},
+            ))
 
     chat_history.append({"role": "assistant", "content": response})
     _save_chat_history(chat_history)
