@@ -1,6 +1,6 @@
 # ======================================================================
 # 🤖 Agentic AI + Gradio + Persistent Memory (Chroma)
-# Sources: DuckDuckGo, Wikipedia, Arxiv, PubMed + RAG (PDFs)
+# Sources: DuckDuckGo, Wikipedia, Arxiv + RAG (PDFs)
 # Ready for Google Colab
 # ======================================================================
 
@@ -25,7 +25,7 @@ from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_core.messages import HumanMessage
 from langchain_classic.agents import AgentExecutor, create_openai_tools_agent, Tool
 from langchain_core.tools import StructuredTool
-from langchain_community.utilities import DuckDuckGoSearchAPIWrapper, WikipediaAPIWrapper, ArxivAPIWrapper, PubMedAPIWrapper
+from langchain_community.utilities import DuckDuckGoSearchAPIWrapper, WikipediaAPIWrapper, ArxivAPIWrapper
 from langchain_community.vectorstores import Chroma
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -364,11 +364,13 @@ def _save_chat_history(chat_history):
         json.dump(serialisable, f, indent=2)
 
 INSTRUCTIONS = """
-### 🧠 How to use
-- **General search:** Just ask normally (uses DuckDuckGo/Wikipedia).
-- **Academic:** Ask for academic topics — the agent may use Arxiv automatically.
-- **Your PDFs (RAG):** Upload files below, then ask questions about them.
-- **/clear:** Erases all memory and your PDF database.
+Your AI assistant for the **DigiJazz.nl audit engagement**. Ask about financial data, cost drivers, accounting standards, or build and interpret regression models.
+
+### How to use
+- **DigiJazz data:** Ask about the dataset, explore cost features, or train a revenue regression model.
+- **Research:** Ask about accounting standards or industry context — the agent searches the web, Wikipedia, and Arxiv.
+- **Your PDFs (RAG):** Upload audit files below, then ask questions about them.
+- **/clear:** Erases all memory, your PDF database, and the chat log.
 """
 
 def respond(msg, chat_history, model_name):
@@ -474,8 +476,11 @@ def upload_pdfs(files, chat_history):
     _save_chat_history(chat_history)
     return chat_history, chat_history
 
-with gr.Blocks(title="🏰 Nyenrode Agentic AI") as demo:
-    gr.Markdown("# 🏰🤖 Nyenrode Agentic AI with Persistent Memory and RAG (PDFs)")
+_LOGO_PATH = str(Path(__file__).parent / "logo_nyenrode.svg")
+
+with gr.Blocks(title="🏰 DigiJazz Audit Assistant") as demo:
+    gr.Image(_LOGO_PATH, show_label=False, container=False, height=28)
+    gr.Markdown("# 🏰🤖 DigiJazz Audit Assistant")
     gr.Markdown(INSTRUCTIONS)
 
     with gr.Row():
