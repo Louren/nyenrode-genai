@@ -4,7 +4,7 @@
 
 An AI audit assistant with persistent memory, regression analysis, and retrieval-augmented generation (RAG), built with LangChain and Gradio. Tailored for auditors working on the DigiJazz.nl engagement.
 
-[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/louren/nyenrode-genai/blob/main/agent.ipynb)
+[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/louren/nyenrode-genai/blob/main/colab.ipynb)
 
 
 ## Features
