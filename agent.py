@@ -15,8 +15,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 if not os.environ.get("OPENAI_API_KEY"):
-    print("🔑 Enter your OpenAI API Key (get it at https://platform.openai.com/api-keys)")
+    print("🔑 Enter your API key (your personal course key, or an OpenAI key):")
     os.environ["OPENAI_API_KEY"] = getpass("Paste your key here: ")
+
+# LiteLLM proxy — set LITELLM_BASE_URL in .env to enable (e.g. http://localhost:4000)
+LITELLM_BASE_URL: str | None = os.environ.get("LITELLM_BASE_URL")
 
 print("✅ API Key set!")
 
@@ -26,10 +29,11 @@ from langchain_core.messages import HumanMessage
 from langchain_classic.agents import AgentExecutor, create_openai_tools_agent, Tool
 from langchain_core.tools import StructuredTool
 from langchain_community.utilities import DuckDuckGoSearchAPIWrapper, WikipediaAPIWrapper, ArxivAPIWrapper
+from langchain_community.callbacks import get_openai_callback
 from langchain_community.vectorstores import Chroma
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_classic.memory import ConversationBufferMemory
+from langchain_classic.memory import ConversationBufferMemory, ConversationBufferWindowMemory
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 # ============================== Paths ===============================
@@ -46,10 +50,26 @@ UPLOAD_DIR = Path("/content/uploads") if _IN_COLAB else PERSIST_BASE / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True, parents=True)
 
 # ============================ Embeddings & DB ==============================
-embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+embeddings = OpenAIEmbeddings(
+    model="text-embedding-3-small",
+    **({"openai_api_base": LITELLM_BASE_URL} if LITELLM_BASE_URL else {}),
+)
 
-# Conversational memory (buffer — maintains sequential message history)
-memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+# Conversational memory (window — keeps last 10 exchange pairs to stay within token limits)
+memory = ConversationBufferWindowMemory(k=10, memory_key="chat_history", return_messages=True)
+
+# ========================= Usage Tracking =========================
+_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "total_cost": 0.0, "calls": 0}
+
+def _format_usage() -> str:
+    return (
+        f"**Session usage** — "
+        f"Calls: {_usage['calls']} | "
+        f"Prompt: {_usage['prompt_tokens']:,} | "
+        f"Completion: {_usage['completion_tokens']:,} | "
+        f"Total: {_usage['total_tokens']:,} tokens | "
+        f"Est. cost: ${_usage['total_cost']:.4f}"
+    )
 
 # Persistent PDF knowledge base (RAG)
 docs_vectorstore = Chroma(
@@ -259,7 +279,11 @@ _executor_cache: dict = {}
 
 def _get_executor(model_name: str) -> AgentExecutor:
     if model_name not in _executor_cache:
-        llm = ChatOpenAI(model=model_name, temperature=0.3)
+        llm = ChatOpenAI(
+            model=model_name,
+            temperature=0.3,
+            **({"openai_api_base": LITELLM_BASE_URL} if LITELLM_BASE_URL else {}),
+        )
         agent = create_openai_tools_agent(llm=llm, tools=tools, prompt=prompt)
         _executor_cache[model_name] = AgentExecutor(
             agent=agent, tools=tools, verbose=True, memory=memory,
@@ -381,18 +405,24 @@ def respond(msg, chat_history, model_name):
         clear_all_memory()
         Path(CHAT_LOG).unlink(missing_ok=True)
         cleared = [{"role": "assistant", "content": "🧹 Memory, PDF base, and chat history cleared."}]
-        return cleared, cleared
+        return cleared, cleared, _format_usage()
 
     chat_history.append({"role": "user", "content": msg})
 
     try:
-        result = _get_executor(model_name).invoke({"input": msg})
+        with get_openai_callback() as cb:
+            result = _get_executor(model_name).invoke({"input": msg})
+        _usage["prompt_tokens"] += cb.prompt_tokens
+        _usage["completion_tokens"] += cb.completion_tokens
+        _usage["total_tokens"] += cb.total_tokens
+        _usage["total_cost"] += cb.total_cost
+        _usage["calls"] += 1
         response = result["output"]
         steps = result.get("intermediate_steps", [])
     except Exception as e:
         chat_history.append({"role": "assistant", "content": f"⚠️ Error: {e}"})
         _save_chat_history(chat_history)
-        return chat_history, chat_history
+        return chat_history, chat_history, _format_usage()
 
     for action, observation in steps:
         tool_input = action.tool_input if isinstance(action.tool_input, str) else str(action.tool_input)
@@ -452,7 +482,7 @@ def respond(msg, chat_history, model_name):
 
     chat_history.append({"role": "assistant", "content": response})
     _save_chat_history(chat_history)
-    return chat_history, chat_history
+    return chat_history, chat_history, _format_usage()
 
 def upload_pdfs(files, chat_history):
     """Handles uploaded PDFs and indexes them."""
@@ -474,7 +504,7 @@ def upload_pdfs(files, chat_history):
                          "content": f"📚 {len(files)} file(s) uploaded. "
                                     f"Indexed {chunks} text chunks into RAG. You can now ask questions!"})
     _save_chat_history(chat_history)
-    return chat_history, chat_history
+    return chat_history, chat_history, _format_usage()
 
 _LOGO_PATH = str(Path(__file__).parent / "logo_nyenrode.svg")
 
@@ -498,15 +528,17 @@ with gr.Blocks(title="🏰 DigiJazz Audit Assistant") as demo:
         files = gr.File(label="Upload your PDFs (RAG)", file_count="multiple", file_types=[".pdf"])
         btn_up = gr.Button("Index PDFs")
 
+    usage_display = gr.Markdown(_format_usage())
+
     def _on_load():
         h = _load_chat_history()
         return h, h
 
     demo.load(_on_load, outputs=[chatbot, state])
 
-    btn.click(respond, [msg, state, model_selector], [chatbot, state]).then(lambda: "", outputs=msg)
-    msg.submit(respond, [msg, state, model_selector], [chatbot, state]).then(lambda: "", outputs=msg)
+    btn.click(respond, [msg, state, model_selector], [chatbot, state, usage_display]).then(lambda: "", outputs=msg)
+    msg.submit(respond, [msg, state, model_selector], [chatbot, state, usage_display]).then(lambda: "", outputs=msg)
 
-    btn_up.click(upload_pdfs, [files, state], [chatbot, state])
+    btn_up.click(upload_pdfs, [files, state], [chatbot, state, usage_display])
 
 demo.launch(share=True)
